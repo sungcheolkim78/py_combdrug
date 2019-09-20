@@ -1,6 +1,6 @@
 #!/usr/local/bin/python3
 """
-py_auc - python library for calculating the area under the curve (ROC, PR) of binary classifiers
+py_combdrug - python library for calculating the effect of combination drugs
 
 author: Sungcheol Kim @ IBM
 email: kimsung@us.ibm.com
@@ -11,13 +11,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import time
-
-from sklearn.metrics import average_precision_score
-from sklearn.metrics import roc_auc_score
+import scipy.stats
 
 
-class AUC(object):
-    """ object for area under the curve (AUC) calculation
+class POPULATION(object):
+    """ object of patient/cell population for drug effects
     example:
         import py_auc
         a = py_auc.AUC(sg.get_asDataFrame())
@@ -25,450 +23,294 @@ class AUC(object):
         a.plot_ROC()
     """
 
-    def __init__(self, data=None, debug=False):
+    def __init__(self, tmax=30, tnum=100, snum=100, debug=False):
         """
         initialize with scores and classes
         input: data - panda DataFrame with "Score" and "Class" columns
         """
 
-        self._scores = []
-        self._classes = []
-        self._data = data
-
+        self._tmax = tmax
+        self._tnum = tnum
+        self._snum = snum
         self._debug = debug
 
-        self._n0 = 0       # class 0
-        self._n1 = 0       # class 1
-        self._n = 0
+        self._info = {}
+        self._pdata = pd.DataFrame()
+        self._tdata = pd.DataFrame()
+        self._trange = np.linspace(0, self._tmax, num=self._tnum)
 
-        self._spm = None
+    def get_scurve_file(self, drugname, filename):
+        """ survival curve data from file """
 
-        if (data is not None) and ("Score" in data.columns) and ("Class" in data.columns):
-            self.get_classes_scores(data["Class"], data["Score"])
+        a = pd.read_csv(filename, header=None, names=['T','D'])
+        a.sort_values('T', inplace=True)
+        self._pdata[drugname+'_Time'] = np.append(a['T'].values, [np.nan] * (self._tnum - len(a['T'])))
+        self._pdata[drugname] = np.append(a['D'].values, [np.nan] * (self._tnum - len(a['D'])))
+        self._info.update({drugname: [a['T'].mean(), 1.0, a['T'].max()]})
 
-    def get_classes_scores(self, c, s):
-        """ add scores and classes """
+    def get_scurve_hill(self, drugname, t50, hillcoeff):
+        """ survival curve data from hill function """
 
-        if len(c) != len(s):
-            print('... dimension is not matches: score - %d    class - %d'.format(len(s), len(c)))
-            return
+        self._pdata[drugname+'_Time'] = self._trange
+        self._pdata[drugname] = hill(self._trange, t50, hillcoeff)
+        self._info.update({drugname: [t50, hillcoeff, self._tmax]})
 
-        self._scores = s
-        self._classes = c
+    def gen_stime(self, drugname, show=False):
+        """ generate individual survival time from survival curve """
 
-        self._n = len(self._scores)
-        self._n1 = np.count_nonzero(self._classes)
-        self._n0 = self._n - self._n1
+        sur = self._pdata[drugname].values/self._pdata[drugname].max()
+        t = self._pdata[drugname+'_Time'].values
 
-        self._prepare()
+        # confirm last point hit 0 for inverse function
+        sur = np.append(sur[~np.isnan(sur)], 0)
+        t = np.append(t[~np.isnan(t)], t.max())
 
-    def get_scores(self, s0, s1):
-        """ add class 0 score and class 1 score separately """
+        if self._debug:
+            print('sur: {}\nt: {}'.format(sur, t))
 
-        self._n0 = len(s0)
-        self._n1 = len(s1)
-        self._n = self._n0 + self._n1
+        self._tdata['t_'+drugname] = patient_sur(self._snum, t, sur, show=show)
 
-        self._scores = np.zeros(self._n)
-        self._scores[:self._n0] = s0
-        self._scores[self._n0:] = s1
-        self._classes = np.ones(self._n)
-        self._classes[:self._n0] = 0
+    def gen_drugpair(self, drugnames, rho, **kwargs):
+        """ generate correlated pairing between two survival times """
 
-        self._prepare()
+        t_drugnames = [ 't_'+x for x in drugnames ]
+        A = self._tdata[t_drugnames[0]].sort_values()
+        B = self._tdata[t_drugnames[1]].sort_values()
 
-    def n(self):
-        return self._n
+        y = MC_suffle(len(A), rho, debug=self._debug, **kwargs)
 
-    def n0(self):
-        return self._n0
+        self._tdata[t_drugnames[0]] = A.values
+        self._tdata[t_drugnames[1]] = B.values[y]
 
-    def n1(self):
-        return self._n1
+    def gen_combdrug(self, drugnames, new_drug=None):
+        """ calculate survival time using independent drug action """
 
-    def _prepare(self):
-        """ calculate rank """
+        if new_drug is None:
+            new_drug = '+'.join(drugnames)
+        t_drugnames = [ 't_'+x for x in drugnames ]
+        smax = self._tdata[t_drugnames].max(axis=1)
+        self._tdata['t_'+new_drug] = smax
+        self._info.update({new_drug: [smax.mean(), 1.0, smax.max()]})
 
-        self._data = pd.DataFrame()
+    def plot_scurve(self, drugnames, ax=None, filename=None, labels=None):
+        """ plot survival curve of monotherapy """
 
-        self._data['Score'] = self._scores
-        self._data['Class'] = self._classes
+        if ax is None: ax = plt.gcf().gca()
+        if labels is None: labels = drugnames
 
-        self._spm = self._data.sort_values(by='Score', ascending=False)
-        self._spm['Rank'] = range(self._n+1)[1:]
-        self._spm['FPR'] = (self._spm['Class'] == 0).cumsum().values/self._n0         # FPR
-        self._spm['TPR'] = (self._spm['Class'] == 1).cumsum().values/self._n1         # TPR or recall
-        self._spm['Prec'] = (self._spm['Class'] == 1).cumsum().values/(np.arange(self._n) + 1)    # precision
+        for i, drugname in enumerate(drugnames):
+            if self._pdata[drugname].isna().sum() > 10:
+                ax.plot(self._pdata[drugname+'_Time'], self._pdata[drugname], '.-', label=labels[i], drawstyle='steps-mid')
+            else:
+                ax.plot(self._pdata[drugname+'_Time'], self._pdata[drugname], label=labels[i])
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Survival')
+        ax.legend()
 
-    def cal_auc_rank(self, measure_time=False):
-        """ calculate area under ROC using rank algorithm """
-
-        if measure_time: start_time = time.time()
-
-        self._spm = self._data.sort_values(by='Score', ascending=False)
-        self._spm['Rank'] = np.arange(self._n+1)[1:]/self._n
-        mask = self._spm['Class'] == 0
-
-        auc = 0.5 + (self._spm[mask].Rank.mean() - self._spm[~mask].Rank.mean())
-
-        if measure_time:
-            return (auc, (time.time() - start_time))
-        else:
-            return (auc)
-
-    def cal_auc_bac(self, measure_time=False):
-        """ calculate area under ROC using rank algorithm """
-
-        if measure_time: start_time = time.time()
-
-        self._spm = self._data.sort_values(by='Score', ascending=False)
-        self._spm['FPR'] = (self._spm['Class'] == 0).cumsum().values/self._n0         # FPR
-        self._spm['TPR'] = (self._spm['Class'] == 1).cumsum().values/self._n1         # TPR or recall
-
-        auc = np.sum(self._spm['TPR'] + 1 - self._spm['FPR'])/self._n - 0.5
-
-        if measure_time:
-            return (auc, (time.time() - start_time))
-        else:
-            return (auc)
-
-    def cal_auc_trapz(self, measure_time=False):
-        """ calculate area under ROC using trapz function """
-
-        if measure_time: start_time = time.time()
-
-        self._spm = self._data.sort_values(by='Score', ascending=False)
-        x = (self._spm['Class'] == 0).cumsum().values/self._n0         # FPR
-        y = (self._spm['Class'] == 1).cumsum().values/self._n1         # TPR or recall
-
-        auc = np.trapz(y, x=x)
-
-        if measure_time:
-            return (auc, (time.time() - start_time))
-        else:
-            return (auc)
-
-    def cal_auc_sklearn(self, measure_time=False):
-        """ calculate area under ROC using scikit-learning """
-
-        if measure_time: start_time = time.time()
-
-        auc = roc_auc_score(self._classes, self._scores)
-
-        if measure_time:
-            return (auc, (time.time() - start_time))
-        else:
-            return (auc)
-
-    def cal_auprc_rank(self, measure_time=False):
-        """ calculate area under precision-recall curve using rank algorithm """
-
-        if measure_time: start_time = time.time()
-
-        rho = self._n1/self._n
-
-        self._spm = self._data.sort_values(by='Score', ascending=False)
-        p = (self._spm['Class'] == 1).cumsum().values/(np.arange(self._n) + 1)    # precision
-
-        auprc = 0.5*rho*(1.0 + np.sum(p*p)/(self._n*rho*rho))
-
-        if measure_time:
-            return (auprc, (time.time() - start_time))
-        else:
-            return(auprc)
-
-    def cal_auprc_trapz(self, measure_time=False):
-        """ calculate area under precision-recall curve using trapz algorithm """
-
-        if measure_time: start_time = time.time()
-
-        self._spm = self._data.sort_values(by='Score', ascending=False)
-        y = (self._spm['Class'] == 1).cumsum().values/self._n1         # TPR or recall
-        p = (self._spm['Class'] == 1).cumsum().values/(np.arange(self._n) + 1)    # precision
-
-        auprc = np.trapz(p, x=y)
-
-        if measure_time:
-            return (auprc, (time.time() - start_time))
-        else:
-            return(auprc)
-
-    def cal_auprc_sklearn(self, measure_time=False):
-        """ calculate area under PRC using scikit-learning """
-
-        if measure_time: start_time = time.time()
-
-        auprc = average_precision_score(self._classes, self._scores)
-
-        if measure_time:
-            computetime = time.time() - start_time
-            return (auprc, computetime)
-        else:
-            return auprc
-
-    def plot_rank(self, sampling=10, filename=''):
-        """ plot rank vs class """
-
-        self._prepare()
-
-        cmatrix = self._spm['Class'].values.reshape(sampling, -1)
-        prob = cmatrix.mean(axis=1)
-
-        fig, axs = plt.subplots(nrows=1, ncols=3, figsize=(15,4))
-
-        ax0 = axs[0]
-        ax0.plot(prob, '.')
-        ax0.set_xlabel('Sampled Rank r\'')
-        ax0.set_ylabel('P(1|r\')')
-
-        ax1 = axs[1]
-        ax1.plot(self._spm['Rank'], self._spm['TPR'], label='TPR')
-        ax1.plot(self._spm['Rank'], self._spm['FPR'], '--', label='FPR')
-        ax1.set_xlabel('Rank r')
-        ax1.set_ylabel('TPR(r), FPR(r)')
-        ax1.legend()
-
-        ax2 = axs[2]
-        ax2.plot(self._spm['Rank'], self._spm['Prec'], label='prec')
-        bac = (self._spm['TPR'].values + 1.0 - self._spm['FPR'].values)/2.0
-        ax2.plot(self._spm['Rank'], bac, '--', label='bac')
-        ax2.set_xlabel('Rank r')
-        ax2.set_ylabel('Precision(r), bac(r)')
-        ax2.legend()
-
-        if filename == '': filename = 'rank_plot.pdf'
+        if filename is None: filename = 'survival_curve_'+'_'.join(labels)+'.pdf'
         plt.savefig(filename, dpi=150)
 
-    def plot_ROC(self, bins=50, filename=''):
-        """ calculate ROC curve (receiver operating characteristic curve) """
+    def plot_scurve_stime(self, drugnames, num=30, ax=None, filename=None, labels=None):
+        """ plot survival curves from patient/cell survival times """
 
-        self._prepare()
+        if ax is None: ax = plt.gcf().gca()
+        if labels is None: labels = drugnames
 
-        auc = np.trapz(self._spm['TPR'], x=self._spm['FPR'])
-        print('AUC (area under the ROC curve): {0:8.3f}'.format(auc))
+        for i, drugname in enumerate(drugnames):
+            s = []
+            t = np.linspace(0, self._info[drugname][2], num=num)
+            if 't_'+drugname not in self._tdata.columns:
+                self.gen_stime(drugname)
 
-        auc = np.trapz(self._spm['Prec'], x=self._spm['TPR'])
-        print('AUPRC (area under the PRC curve): {0:8.3f}'.format(auc))
+            N = len(self._tdata['t_'+drugname])
+            for t_n in t:
+                s.append((self._tdata['t_'+drugname] >= t_n).sum()/N)
+            if N > 50:
+                ax.plot(t, np.array(s), '.-', label=labels[i])
+            else:
+                ax.plot(t, np.array(s), '.-', drawstyle='steps-mid', label=labels[i])
 
-        # ROC plot
-        fig, axs = plt.subplots(nrows=1, ncols=3, figsize=(15,4))
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Survival')
+        ax.set_ylim(-0.05, 1.05)
+        ax.legend()
 
-        ax0 = axs[0]
-        ax0.plot(self._spm['FPR'], self._spm['TPR'], label='ROC')
-        ax0.set_xlabel('FPR')
-        ax0.set_ylabel('TPR')
-        #ax0.set_xlim(0, 1.1)
-        #ax0.set_ylim(0, 1.1)
-
-        # PR plot
-        ax1 = axs[1]
-        ax1.plot(self._spm['TPR'], self._spm['Prec'], label='PRC')
-        ax1.set_xlabel('Recall (TPR)')
-        ax1.set_ylabel('Precision')
-        #ax1.set_xlim(0, 1.1)
-        #ax1.set_ylim(0, 1.1)
-        #ax1.set_title('Precision-Recall Curve')
-
-        # score distribution
-        ax2 = axs[2]
-        sns.distplot(self._spm.loc[self._spm['Class']==0, 'Score'], bins=bins, kde=False, rug=True, label='Class 0')
-        sns.distplot(self._spm.loc[self._spm['Class']==1, 'Score'], bins=bins, kde=False, rug=True, label='Class 1')
-        ax2.legend(loc='upper right')
-        ax2.set_xlabel('Scores')
-        ax2.set_ylabel('#')
-
-        if filename == '':
-            filename = 'auc_summary.pdf'
-        plt.savefig(filename, dpi=150)
-        plt.show()
-
-
-class Score_generator(object):
-    """ two class score generator
-    example:
-        import py_auc
-        sg = py_auc.Score_generator()
-        sg.set0('gaussian', 0, 1, 1000)
-        sg.set1('gaussian', 3, 1, 1000)
-    """
-
-    def __init__(self):
-        """ """
-
-        self._kind0 = ''
-        self._kind1 = ''
-        self._mu0 = 0
-        self._mu1 = 0
-        self._std0 = 0
-        self._std1 = 0
-        self._n0 = 100
-        self._n1 = 100
-        self._n = self._n0 + self._n1
-        self._rho = self._n1/self._n
-
-        self._s0 = []
-        self._s1 = []
-        self._prob = []
-        self._sampleN = 0
-        self._sampling = []
-
-    def _generate(self, kind, mu, std, n):
-        """ set parameters of class """
-
-        if kind.lower() not in ['uniform', 'gaussian', 'triangle']:
-            kind = 'uniform'
-
-        if kind.lower() == 'uniform':
-            temp = np.random.uniform(low=mu-std, high=mu+std, size=n)
-        elif kind.lower() == 'gaussian':
-            temp = np.random.normal(loc=mu, scale=std, size=n)
-        elif kind.lower() == 'triangle':
-            temp = np.random.triangular(mu-std, mu, mu+std, size=n)
-
-        return temp, kind, mu, std, n
-
-    def set0(self, kind, mu, std, n):
-        """
-        kind : ['uniform', 'gaussian', 'triangle']
-        mu : mean
-        std : standard deviation
-        n : number of samples
-        """
-
-        self._s0, self._kind0, self._mu0, self._std0, self._n0 = self._generate(kind, mu, std, n)
-
-    def set1(self, kind, mu, std, n):
-        """
-        kind : ['uniform', 'gaussian', 'triangle']
-        mu : mean
-        std : standard deviation
-        n : number of samples
-        """
-        self._s1, self._kind1, self._mu1, self._std1, self._n1 = self._generate(kind, mu, std, n)
-
-        self._n = self._n0 + self._n1
-        self._rho = float(self._n1/self._n)
-
-    def get(self):
-        """ get scores """
-
-        return [self._s0, self._s1]
-
-    def get_asDataFrame(self):
-        """ get scores as DataFrame """
-
-        scores = np.zeros(self._n)
-        scores[:self._n0] = self._s0
-        scores[self._n0:] = self._s1
-        classes = np.ones(self._n)
-        classes[:self._n0] = 0
-
-        return pd.DataFrame({'Score': scores, 'Class': classes})
-
-    def get_randomSample(self, n):
-        """ get sample of scores """
-
-        temp = self.get_asDataFrame()
-        return temp.sample(n)
-
-    def get_classProbability(self, sampleSize=100, sampleN=100, measure_time=False):
-        """ calculate probability of class 1 at given rank r """
-
-        if measure_time: start_time = time.time()
-
-        temp = self.get_asDataFrame()
-        temp0 = temp[temp['Class'] == 0]
-        temp1 = temp[temp['Class'] == 1]
-        n1 = int(sampleSize*self._rho)
-        n0 = sampleSize - n1
-
-        res = pd.DataFrame()
-        res['Rank'] = range(sampleSize+1)[1:]
-
-        for i in range(sampleN):
-            a = pd.concat([temp0.sample(n0), temp1.sample(n1)]).sort_values(by='Score', ascending=False)
-            res['Class_{}'.format(i)] = a['Class'].values
-
-        self._prob = res.values[:, 1:sampleN+1].mean(axis=1)
-        res['P(1|r)'] = self._prob
-        res['P(0|r)'] = 1 - self._prob
-
-        res['TPR'] = np.cumsum(res['P(1|r)'])/n1
-        res['FPR'] = np.cumsum(res['P(0|r)'])/n0
-        res['Prec'] = np.cumsum(res['P(1|r)'])/res['Rank']
-        res['bac'] = 0.5*(res['TPR'] + 1.0 - res['FPR'])
-        self._sampling = res
-
-        self._sampleN = sampleN
-        self._sampleSize = sampleSize
-        self._sampleN0 = n0
-        self._sampleN1 = n1
-        self._auc = np.sum(res['P(0|r)']*res['Rank']/n0 - res['P(1|r)']*res['Rank']/n1)/sampleSize + 0.5
-        self._aucbac = 2*np.sum(res['bac'])/sampleSize - 0.5
-        self._auprc = 0.5*self._rho + 0.5*np.sum(res['Prec']*res['Prec'])/n1
-
-        if measure_time:
-            return (res, (time.time()-start_time))
-        else:
-            return res
-
-    def plot(self, filename='', show=True):
-        """ plot histogram """
-
-        plt.close('all')
-        fig = plt.figure(figsize=(6,5))
-
-        sns.distplot(self._s0, bins=50, kde=False, rug=True, label='Class 0 (#={})'.format(self._n0))
-        sns.distplot(self._s1, bins=50, kde=False, rug=True, label='Class 1 (#={})'.format(self._n1))
-        plt.annotate("mu={}\ns={}".format(self._mu0, self._std0), xy=(self._mu0, 0), xytext=(0.25, 0.25),
-                textcoords='axes fraction', horizontalalignment='left',
-                arrowprops=dict(facecolor='black', shrink=0.05))
-        plt.annotate("mu={}\ns={}".format(self._mu1, self._std0), xy=(self._mu1, 0), xytext=(0.75, 0.25),
-                textcoords='axes fraction', horizontalalignment='right',
-                arrowprops=dict(facecolor='black', shrink=0.05))
-        plt.xlabel('Score')
-        plt.ylabel('#')
-        plt.legend()
-
-        if filename == '':
-            filename = 'score_hist.pdf'
-
-        plt.savefig(filename, dpi=150)
-        if show: plt.show()
-
-    def plot_prob(self, filename='', ss=100, sn=100, fig=None, show=True, sample=None):
-        """ plot class probability """
-
-        if sample is not None:
-            a = sample
-        else:
-            a = self.get_classProbability(sampleSize=ss, sampleN=sn)
-
-        if fig is None:
-            plt.close('all')
-            fig = plt.figure(figsize=(14, 6))
-
-        ax1 = fig.add_subplot(121)
-        r = range(len(self._prob))
-        ax1.plot(r, self._prob, '.', label='Size={}, #={}'.format(len(self._prob), self._sampleN), alpha=0.5)
-        ax1.set_xlabel('Rank')
-        ax1.set_ylabel('P(1|r)')
-        ax1.set_ylim((-0.05, 1.05))
-        ax1.legend()
-
-        ax2 = fig.add_subplot(122)
-        ax2.plot(a['FPR'], a['TPR'], '.', label='Size={}, #={}, auc={:.4f}'.format(len(self._prob), self._sampleN, self._auc), alpha=0.5)
-        ax2.set_xlabel('FPR')
-        ax2.set_ylabel('TPR')
-        ax2.legend()
-
-        if filename == '':
-            filename = 'classProbability.pdf'
+        if filename is None: filename = 'survival_time_'+'_'.join(labels)+'.pdf'
         plt.savefig(filename, dpi=150)
 
-        if show:
-            plt.show()
-            return
-        else:
-            return fig
+    def plot_stime(self, drugnames, filename=None):
+        """ scatterplot of individual survival time """
 
+        #if ax is None:
+        #    ax = plt.gcf().gca()
+
+        A = 't_'+drugnames[0]
+        B = 't_'+drugnames[1]
+        if A not in self._tdata.columns:
+            self.gen_stime(drugnames[0])
+        if B not in self._tdata.columns:
+            self.gen_stime(drugnames[1])
+
+        rho, p = scipy.stats.spearmanr(self._tdata[A], self._tdata[B])
+        xmax = np.max(self._tdata[[A, B]].max().values)
+
+        g = sns.JointGrid(x=A, y=B, data=self._tdata, xlim=(-5, xmax+5), ylim=(-5, xmax+5))
+        g = g.plot_joint(sns.regplot)
+        ax = plt.gcf().gca()
+        ax.plot([0, xmax], [0, xmax], 'k-.', alpha=0.8)
+        g = g.plot_marginals(sns.distplot, bins=int(xmax/3))
+        g.annotate(scipy.stats.spearmanr)
+
+        if filename is None: filename = 'corr_plot'+'_'.join(drugnames)+'_{:.4f}.pdf'.format(rho)
+        g.savefig(filename, dpi=150)
+
+
+def hill(t, t50, h):
+    """ hill function with half life """
+
+    return 1./(1. + np.power(t/t50, h))
+
+
+def patient_sur(N, t, survival, show=False):
+    """ generate N patient survival time from survival function """
+
+    y_n = np.random.uniform(0, 1.0, N)
+    x_n = np.interp(1 - y_n, 1 - survival, t)
+
+    if show:
+        plt.plot(x_n, y_n, '.')
+        plt.plot(t, survival)
+        plt.xlabel('Time')
+        plt.ylabel('Survival')
+
+    return x_n.flatten()
+
+
+def MC_suffle(N, rho, conf=0.01, rate=50.0, max_iter=20000, debug=False):
+    """ create jittered rank list """
+
+    stime = time.time()
+    it = 0
+
+    # prepare initial values
+    x = np.arange(N)
+    if rho >= 1.0:
+        return x
+    elif rho > 0.7:
+        y = x.copy()
+        y[:int(N/2)] = np.random.permutation(y[:int(N/2)])
+        y[int(N/2):] = np.random.permutation(y[int(N/2):])
+    elif rho <= -1.0:
+        return x[::-1]
+    elif rho < -0.7:
+        y = x.copy()[::-1]
+        y[:int(N/2)] = np.random.permutation(y[:int(N/2)])
+        y[int(N/2):] = np.random.permutation(y[int(N/2):])
+    else:
+        y = np.random.permutation(x)
+
+    rho_s0, p = scipy.stats.spearmanr(x, y)
+
+    while(it < max_iter):
+        # select two items and exchange order
+        idx = np.random.randint(0, N, 2)
+        y_orig = y.copy()
+        y[idx] = y_orig[idx[::-1]]
+
+        rho_s, p = scipy.stats.spearmanr(x, y)
+        dist = rho - rho_s
+        dist0 = rho - rho_s0
+        it = it + 1
+
+        # check random exchange result
+        if np.abs(dist) < np.abs(dist0):
+            if debug:
+                print('... rho:{:.4f}, p:{:.4f}, idx: {}, dist: {:.4f}'.format(rho_s, p, idx, dist))
+            rho_s0 = rho_s
+        elif np.abs(dist) >= conf + np.abs(dist0):
+            # selection
+            p = np.exp(-rate*np.abs(dist))
+            if np.random.random(1)[0] > p:
+                y[idx] = y_orig[idx]
+            else:
+                if debug:
+                    print('... rho:{:.4f}, p:{:.4f}, idx: {}, dist: {:.4f}, p: {:.4f}'.format(rho_s, p, idx, dist, p))
+                rho_s0 = rho_s
+        elif np.abs(dist) < conf:
+            break
+
+    print('compute time: {} secs'.format(time.time() - stime))
+    if it == max_iter:
+        print('... not converge! rho: {:.4f}, p: {:.4f}'.format(rho_s, p))
+    else:
+        print('... rho: {:.4f}, p: {:.4f}'.format(rho_s, p))
+
+    return y
+
+def jitter(orderedlist, j=0):
+    """ shuffle ordered list with j amount """
+
+    temp = orderedlist.copy()
+    newlist = []
+
+    for i in range(len(orderedlist)):
+        if j > len(temp)-1:
+            idx = len(temp)
+        else:
+            idx = j
+        element = np.random.choice(temp[:idx], 1) if idx > 0 else temp[0]
+        newlist.append(element)
+
+        # remove one element
+        mask = temp == element
+        if sum(mask) > 1:
+            print('... multiple {} - {}'.format(element, sum(mask)))
+        else:
+            temp = temp[~mask]
+
+    return np.array(newlist).flatten()
+
+
+def jitter2(orderedlist, j=0, sampleN=-1):
+    """ shuffle ordered list with j amount """
+
+    temp = orderedlist.copy()
+    if sampleN == -1:
+        sampleN = len(orderedlist)
+    newlist = []
+
+    if j == 0:
+        return temp
+
+    for i in range(sampleN):
+        idx1 = i-j if (i-j > 0) else 0
+        idx2 = len(temp) if (i+j > len(temp)) else i+j+1
+
+        element = np.random.choice(temp[idx1:idx2], 1)
+        newlist.append(element)
+
+    return np.array(newlist).flatten()
+
+
+def plot_sur_t(pA, pB, pBj, pAB, j=0):
+    #p0 = np.corrcoef(pA, y=pB)[0,1]
+    p0 = scipy.stats.spearmanr(pA, pB)[0]
+
+    #p = np.corrcoef(pA, y=pBj)[0,1]
+    p = scipy.stats.spearmanr(pA, pBj)[0]
+
+    fig = plt.figure(figsize=(14,5))
+    ax = plt.subplot(121)
+
+    plot_survival(pA, t, label='A')
+    plot_survival(pB, t, label='B')
+    plot_survival(pAB, t, label='A+B')
+    plt.legend()
+
+    ax = plt.subplot(122)
+    plt.plot(pA, pB, '.', label='j=0 p={0:.2f}'.format(p0))
+    plt.plot(pA, pBj, '.', label='j={0:d} p={1:.2f}'.format(j, p))
+    plt.plot(pA, pA, label='y=x')
+    plt.xlabel('t_A')
+    plt.ylabel('t_B')
+    plt.legend()
