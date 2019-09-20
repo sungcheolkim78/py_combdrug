@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import time
 import scipy.stats
-from numba import jit
+from numba import njit
 
 
 class POPULATION(object):
@@ -81,9 +81,9 @@ class POPULATION(object):
         stime = time.time()
 
         # computer shuffle with correlation
-        y = MC_suffle(len(A), rho, debug=self._debug, **kwargs)
+        y, it = MC_suffle(len(A), rho, **kwargs)
 
-        print('compute time: {} secs'.format(time.time() - stime))
+        print('compute time: {} secs, # of iteration: {}'.format(time.time() - stime, it))
         rho, p = scipy.stats.spearmanr(np.arange(len(A)), y)
         print('... rho: {:.4f}, p: {:.4f}'.format(rho, p))
 
@@ -118,7 +118,7 @@ class POPULATION(object):
         if filename is None: filename = 'survival_curve_'+'_'.join(labels)+'.pdf'
         plt.savefig(filename, dpi=150)
 
-    def plot_scurve_stime(self, drugnames, num=30, ax=None, filename=None, labels=None):
+    def plot_scurve_stime(self, drugnames, ax=None, filename=None, labels=None):
         """ plot survival curves from patient/cell survival times """
 
         if ax is None: ax = plt.gcf().gca()
@@ -126,7 +126,7 @@ class POPULATION(object):
 
         for i, drugname in enumerate(drugnames):
             s = []
-            t = np.linspace(0, self._info[drugname][2], num=num)
+            t = np.linspace(0, self._info[drugname][2], num=self._tnum)
             if 't_'+drugname not in self._tdata.columns:
                 self.gen_stime(drugname)
 
@@ -194,8 +194,8 @@ def patient_sur(N, t, survival, show=False):
     return x_n.flatten()
 
 
-@jit(nopython=True, cache=True)
-def MC_suffle(N, rho, conf=0.01, rate=200.0, annealing=1.0, max_iter=5000000, debug=False):
+@njit(fastmath=True, cache=True)
+def MC_suffle(N, rho, conf=0.01, rate=200.0, annealing=1.0, max_iter=5000000):
     """ create jittered rank list """
 
     it = 0
@@ -204,7 +204,7 @@ def MC_suffle(N, rho, conf=0.01, rate=200.0, annealing=1.0, max_iter=5000000, de
     # prepare initial values
     x = np.arange(N)
     if rho >= 1.0:
-        return x
+        return x, it
     elif rho > 0.95:
         y = x.copy()
     elif rho > 0.9:
@@ -218,7 +218,7 @@ def MC_suffle(N, rho, conf=0.01, rate=200.0, annealing=1.0, max_iter=5000000, de
         y[:N2] = np.random.permutation(y[:N2])
         y[N2:] = np.random.permutation(y[N2:])
     elif rho <= -1.0:
-        return x[::-1]
+        return x[::-1], it
     elif rho < -0.95:
         y = x.copy()[::-1]
     elif rho < -0.9:
@@ -247,28 +247,28 @@ def MC_suffle(N, rho, conf=0.01, rate=200.0, annealing=1.0, max_iter=5000000, de
         #rho_s, p = scipy.stats.spearmanr(x, y)
         rho_s = np.corrcoef(x, y)[0, 1]
         p = 0
-        dist = rho - rho_s
-        dist0 = rho - rho_s0
+        dist = np.abs(rho - rho_s)
+        dist0 = np.abs(rho - rho_s0)
         it = it + 1
 
         # check random exchange result
-        if np.abs(dist) < np.abs(dist0):
+        if dist < dist0:
             #if debug:
             #    print('... rho:{:.4f}, p:{:.4f}, idx: {}, dist: {:.4f}'.format(rho_s, p, idx, dist))
             rho_s0 = rho_s
-        elif np.abs(dist) >= annealing*conf + np.abs(dist0):
+        elif dist >= annealing*conf + dist0:
             # selection
-            p = np.exp(-rate*np.abs(dist))
+            p = np.exp(-rate*dist)
             if np.random.random(1)[0] > p:
                 y[idx] = y_orig[idx]
             else:
                 #if debug:
                 #    print('... rho:{:.4f}, p:{:.4f}, idx: {}, dist: {:.4f}, p: {:.4f}'.format(rho_s, p, idx, dist, p))
                 rho_s0 = rho_s
-        elif np.abs(dist) < conf:
+        elif dist < conf:
             break
 
-    return y
+    return y, it
 
 def jitter(orderedlist, j=0):
     """ shuffle ordered list with j amount """
