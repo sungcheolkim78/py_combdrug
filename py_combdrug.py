@@ -205,7 +205,7 @@ def MC_suffle(N, rho, conf=0.01, rate=200.0, max_iter=1000000, debug=False):
     x = np.arange(N)
     if rho >= 1.0:
         return x
-    elif rho > 0.85:
+    elif rho > 0.9:
         y = x.copy()
         y[:N1] = np.random.permutation(y[:N1])
         y[N1:N2] = np.random.permutation(y[N1:N2])
@@ -217,7 +217,7 @@ def MC_suffle(N, rho, conf=0.01, rate=200.0, max_iter=1000000, debug=False):
         y[N2:] = np.random.permutation(y[N2:])
     elif rho <= -1.0:
         return x[::-1]
-    elif rho < -0.85:
+    elif rho < -0.9:
         y = x.copy()[::-1]
         y[:N1] = np.random.permutation(y[:N1])
         y[N1:N2] = np.random.permutation(y[N1:N2])
