@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import time
 import scipy.stats
+from numba import jit
 
 
 class POPULATION(object):
@@ -77,7 +78,14 @@ class POPULATION(object):
         A = self._tdata[t_drugnames[0]].sort_values()
         B = self._tdata[t_drugnames[1]].sort_values()
 
+        stime = time.time()
+
+        # computer shuffle with correlation
         y = MC_suffle(len(A), rho, debug=self._debug, **kwargs)
+
+        print('compute time: {} secs'.format(time.time() - stime))
+        rho, p = scipy.stats.spearmanr(np.arange(len(A)), y)
+        print('... rho: {:.4f}, p: {:.4f}'.format(rho, p))
 
         self._tdata[t_drugnames[0]] = A.values
         self._tdata[t_drugnames[1]] = B.values[y]
@@ -186,30 +194,45 @@ def patient_sur(N, t, survival, show=False):
     return x_n.flatten()
 
 
-def MC_suffle(N, rho, conf=0.01, rate=50.0, max_iter=20000, debug=False):
+@jit(nopython=True, cache=True)
+def MC_suffle(N, rho, conf=0.01, rate=200.0, max_iter=1000000, debug=False):
     """ create jittered rank list """
 
-    stime = time.time()
     it = 0
+    N1 = int(N/4); N2 = int(N/2); N3 = int(N*3/4)
 
     # prepare initial values
     x = np.arange(N)
     if rho >= 1.0:
         return x
+    elif rho > 0.85:
+        y = x.copy()
+        y[:N1] = np.random.permutation(y[:N1])
+        y[N1:N2] = np.random.permutation(y[N1:N2])
+        y[N2:N3] = np.random.permutation(y[N2:N3])
+        y[N3:] = np.random.permutation(y[N3:])
     elif rho > 0.7:
         y = x.copy()
-        y[:int(N/2)] = np.random.permutation(y[:int(N/2)])
-        y[int(N/2):] = np.random.permutation(y[int(N/2):])
+        y[:N2] = np.random.permutation(y[:N2])
+        y[N2:] = np.random.permutation(y[N2:])
     elif rho <= -1.0:
         return x[::-1]
+    elif rho < -0.85:
+        y = x.copy()[::-1]
+        y[:N1] = np.random.permutation(y[:N1])
+        y[N1:N2] = np.random.permutation(y[N1:N2])
+        y[N2:N3] = np.random.permutation(y[N2:N3])
+        y[N3:] = np.random.permutation(y[N3:])
     elif rho < -0.7:
         y = x.copy()[::-1]
-        y[:int(N/2)] = np.random.permutation(y[:int(N/2)])
-        y[int(N/2):] = np.random.permutation(y[int(N/2):])
+        y[:N2] = np.random.permutation(y[:N2])
+        y[N2:] = np.random.permutation(y[N2:])
     else:
         y = np.random.permutation(x)
 
-    rho_s0, p = scipy.stats.spearmanr(x, y)
+    #rho_s0, p = scipy.stats.spearmanr(x, y)
+    rho_s0 = np.corrcoef(x, y)[0, 1]
+    p = 0
 
     while(it < max_iter):
         # select two items and exchange order
@@ -217,33 +240,29 @@ def MC_suffle(N, rho, conf=0.01, rate=50.0, max_iter=20000, debug=False):
         y_orig = y.copy()
         y[idx] = y_orig[idx[::-1]]
 
-        rho_s, p = scipy.stats.spearmanr(x, y)
+        #rho_s, p = scipy.stats.spearmanr(x, y)
+        rho_s = np.corrcoef(x, y)[0, 1]
+        p = 0
         dist = rho - rho_s
         dist0 = rho - rho_s0
         it = it + 1
 
         # check random exchange result
         if np.abs(dist) < np.abs(dist0):
-            if debug:
-                print('... rho:{:.4f}, p:{:.4f}, idx: {}, dist: {:.4f}'.format(rho_s, p, idx, dist))
+            #if debug:
+            #    print('... rho:{:.4f}, p:{:.4f}, idx: {}, dist: {:.4f}'.format(rho_s, p, idx, dist))
             rho_s0 = rho_s
-        elif np.abs(dist) >= conf + np.abs(dist0):
+        elif np.abs(dist) >= 2.0*conf + np.abs(dist0):
             # selection
             p = np.exp(-rate*np.abs(dist))
             if np.random.random(1)[0] > p:
                 y[idx] = y_orig[idx]
             else:
-                if debug:
-                    print('... rho:{:.4f}, p:{:.4f}, idx: {}, dist: {:.4f}, p: {:.4f}'.format(rho_s, p, idx, dist, p))
+                #if debug:
+                #    print('... rho:{:.4f}, p:{:.4f}, idx: {}, dist: {:.4f}, p: {:.4f}'.format(rho_s, p, idx, dist, p))
                 rho_s0 = rho_s
         elif np.abs(dist) < conf:
             break
-
-    print('compute time: {} secs'.format(time.time() - stime))
-    if it == max_iter:
-        print('... not converge! rho: {:.4f}, p: {:.4f}'.format(rho_s, p))
-    else:
-        print('... rho: {:.4f}, p: {:.4f}'.format(rho_s, p))
 
     return y
 
