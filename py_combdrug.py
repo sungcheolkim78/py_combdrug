@@ -195,7 +195,7 @@ def patient_sur(N, t, survival, show=False):
 
 
 @jit(nopython=True, cache=True)
-def MC_suffle(N, rho, conf=0.01, rate=200.0, max_iter=1000000, debug=False):
+def MC_suffle(N, rho, conf=0.01, rate=200.0, annealing=1.0, max_iter=5000000, debug=False):
     """ create jittered rank list """
 
     it = 0
@@ -205,6 +205,8 @@ def MC_suffle(N, rho, conf=0.01, rate=200.0, max_iter=1000000, debug=False):
     x = np.arange(N)
     if rho >= 1.0:
         return x
+    elif rho > 0.95:
+        y = x.copy()
     elif rho > 0.9:
         y = x.copy()
         y[:N1] = np.random.permutation(y[:N1])
@@ -217,6 +219,8 @@ def MC_suffle(N, rho, conf=0.01, rate=200.0, max_iter=1000000, debug=False):
         y[N2:] = np.random.permutation(y[N2:])
     elif rho <= -1.0:
         return x[::-1]
+    elif rho < -0.95:
+        y = x.copy()[::-1]
     elif rho < -0.9:
         y = x.copy()[::-1]
         y[:N1] = np.random.permutation(y[:N1])
@@ -252,7 +256,7 @@ def MC_suffle(N, rho, conf=0.01, rate=200.0, max_iter=1000000, debug=False):
             #if debug:
             #    print('... rho:{:.4f}, p:{:.4f}, idx: {}, dist: {:.4f}'.format(rho_s, p, idx, dist))
             rho_s0 = rho_s
-        elif np.abs(dist) >= 2.0*conf + np.abs(dist0):
+        elif np.abs(dist) >= annealing*conf + np.abs(dist0):
             # selection
             p = np.exp(-rate*np.abs(dist))
             if np.random.random(1)[0] > p:
