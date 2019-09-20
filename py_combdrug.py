@@ -17,10 +17,10 @@ import scipy.stats
 class POPULATION(object):
     """ object of patient/cell population for drug effects
     example:
-        import py_auc
-        a = py_auc.AUC(sg.get_asDataFrame())
-        a.cal_auc_rank()
-        a.plot_ROC()
+        import py_combdrug
+        p = py_combdrug.POPULATION()
+        p.get_scurve_hill('A', 5, 2)
+        p.get_scurve_hill('B', 10, 8)
     """
 
     def __init__(self, tmax=30, tnum=100, snum=100, debug=False):
