@@ -100,6 +100,38 @@ class POPULATION(object):
         self._tdata['t_'+new_drug] = smax
         self._info.update({new_drug: [smax.mean(), 1.0, smax.max()]})
 
+    def gen_comb_formula(self, drugnames, rho, new_drug=None):
+        """ calculate combination survival curve using formular """
+
+        if (rho < -1) or (rho > 1):
+            print('... out of range')
+            return
+
+        if new_drug is None:
+            new_drug = '+'.join(drugnames)
+
+        if len(drugnames) > 1:
+            A = self._pdata[drugnames[0]]
+            B = self._pdata[drugnames[1]]
+        else:
+            print('... put two drug names')
+            return
+
+        if rho >= 0:
+            tmp = A + B - A*B - rho*np.minimum(A, B) * (1 - np.maximum(A, B))
+            self._pdata[new_drug+'_Time'] = self._trange
+            self._pdata[new_drug] = tmp
+            self._info.update({new_drug: [tmp.mean(), 1.0, tmp.max()]})
+        else:
+            tmp1 = (A + B - A*B)*(1 + rho) - rho
+            tmp2 = A + B - A*B*(1 + rho)
+
+            tstar = np.argmin(np.abs(tmp1.values - tmp2.values))
+            self._pdata[new_drug+'_Time'] = self._trange
+            self._pdata[new_drug] = tmp2
+            self._pdata[new_drug][:tstar] = tmp1[:tstar]
+
+
     def plot_scurve(self, drugnames, ax=None, filename=None, labels=None):
         """ plot survival curve of monotherapy """
 
@@ -195,7 +227,7 @@ def patient_sur(N, t, survival, show=False):
 
 
 @njit(fastmath=True, cache=True)
-def MC_suffle(N, rho, conf=0.01, rate=200.0, annealing=1.0, max_iter=5000000):
+def MC_suffle(N, rho, conf=0.001, rate=200.0, annealing=1.0, max_iter=50000000):
     """ create jittered rank list """
 
     it = 0
@@ -235,36 +267,40 @@ def MC_suffle(N, rho, conf=0.01, rate=200.0, annealing=1.0, max_iter=5000000):
         y = np.random.permutation(x)
 
     #rho_s0, p = scipy.stats.spearmanr(x, y)
-    rho_s0 = np.corrcoef(x, y)[0, 1]
-    p = 0
+    #rho_s0 = np.corrcoef(x, y)[0, 1]
+    rho_s0 = rank_coeff(x, y)
+    N2_2 = N*(N*N - 1.)/12.
 
     while(it < max_iter):
         # select two items and exchange order
         idx = np.random.randint(0, N, 2)
-        y_orig = y.copy()
-        y[idx] = y_orig[idx[::-1]]
+        #y_orig = y.copy()
+        #y[idx] = y_orig[idx[::-1]]
 
         #rho_s, p = scipy.stats.spearmanr(x, y)
-        rho_s = np.corrcoef(x, y)[0, 1]
-        p = 0
+        #rho_s = np.corrcoef(x, y)[0, 1]
+        #rho_s = rank_coeff(x, y)
+        rho_s = rho_s0 - (idx[0] - idx[1])*(y[idx[0]] - y[idx[1]])/N2_2
         dist = np.abs(rho - rho_s)
         dist0 = np.abs(rho - rho_s0)
         it = it + 1
 
         # check random exchange result
         if dist < dist0:
-            #if debug:
-            #    print('... rho:{:.4f}, p:{:.4f}, idx: {}, dist: {:.4f}'.format(rho_s, p, idx, dist))
             rho_s0 = rho_s
+            y[idx] = y[idx[::-1]]
+            continue
         elif dist >= annealing*conf + dist0:
             # selection
             p = np.exp(-rate*dist)
             if np.random.random(1)[0] > p:
-                y[idx] = y_orig[idx]
+                #y[idx] = y_orig[idx]
+                #rho_s = rho_s0
+                continue
             else:
-                #if debug:
-                #    print('... rho:{:.4f}, p:{:.4f}, idx: {}, dist: {:.4f}, p: {:.4f}'.format(rho_s, p, idx, dist, p))
                 rho_s0 = rho_s
+                y[idx] = y[idx[::-1]]
+                continue
         elif dist < conf:
             break
 
@@ -337,3 +373,12 @@ def plot_sur_t(pA, pB, pBj, pAB, j=0):
     plt.xlabel('t_A')
     plt.ylabel('t_B')
     plt.legend()
+
+
+@njit(fastmath=True, cache=True)
+def rank_coeff(x, y):
+    """ calculate rank correlation coefficient """
+
+    N = len(x)
+    return 12.*(np.sum((x+1)*(y+1))/N - (N+1.)*(N+1.)/4.)/(N*N - 1.)
+
