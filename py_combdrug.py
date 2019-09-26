@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import time
 import scipy.stats
+
+# for increasing speed of algorithm
 from numba import njit
 
 
@@ -44,16 +46,22 @@ class POPULATION(object):
         """ survival curve data from file """
 
         a = pd.read_csv(filename, header=None, names=['T','D'])
-        a.sort_values('T', inplace=True)
-        self._pdata[drugname+'_Time'] = np.append(a['T'].values, [np.nan] * (self._tnum - len(a['T'])))
-        self._pdata[drugname] = np.append(a['D'].values, [np.nan] * (self._tnum - len(a['D'])))
+        t = sorted(np.append(a['T'].values, [np.max(a['T'].values), 0]))
+        sur = sorted(np.append(a['D'].values, [1.0,  0]), reverse=True)
+        if self._debug:
+            print('t: min, mean, max - {}, {}, {}'.format(t.min(), t.mean(), t.max()))
+            print('d: min, mean, max - {}, {}, {}'.format(d.min(), d.mean(), d.max()))
+
+        self._pdata[drugname+'_Time'] = np.append(t, [np.nan] * (self._tnum - len(t)))
+        self._pdata[drugname] = np.append(sur, [np.nan] * (self._tnum - len(sur)))
+        self._pdata[drugname] = self._pdata[drugname]/self._pdata[drugname].max()
         self._info.update({drugname: [a['T'].mean(), 1.0, a['T'].max()]})
 
     def get_scurve_hill(self, drugname, t50, hillcoeff):
         """ survival curve data from hill function """
 
-        self._pdata[drugname+'_Time'] = self._trange
-        self._pdata[drugname] = hill(self._trange, t50, hillcoeff)
+        self._pdata[drugname+'_Time'] = np.append(self._trange, self._tmax)
+        self._pdata[drugname] = np.append(hill(self._trange, t50, hillcoeff), 0)
         self._info.update({drugname: [t50, hillcoeff, self._tmax]})
 
     def gen_stime(self, drugname, show=False):
@@ -61,10 +69,6 @@ class POPULATION(object):
 
         sur = self._pdata[drugname].values/self._pdata[drugname].max()
         t = self._pdata[drugname+'_Time'].values
-
-        # confirm last point hit 0 for inverse function
-        sur = np.append(sur[~np.isnan(sur)], 0)
-        t = np.append(t[~np.isnan(t)], t.max())
 
         if self._debug:
             print('sur: {}\nt: {}'.format(sur, t))
@@ -107,32 +111,44 @@ class POPULATION(object):
             print('... out of range')
             return
 
+        ssize = len(self._pdata)
+
         if new_drug is None:
             new_drug = '+'.join(drugnames)
 
         if len(drugnames) > 1:
-            A = self._pdata[drugnames[0]]
-            B = self._pdata[drugnames[1]]
+            A = self._pdata[drugnames[0]].values
+            A_t = self._pdata[drugnames[0]+'_Time'].values
+            B = self._pdata[drugnames[1]].values
+            B_t = self._pdata[drugnames[1]+'_Time'].values
+
+            if A_t.max() != B_t.max():
+                tmax = np.nanmax(B_t) if np.nanmax(A_t) > np.nanmax(B_t) else np.nanmax(A_t)
+                t = np.linspace(0, tmax, ssize)
+                A = np.interp(t, A_t, A)
+                B = np.interp(t, B_t, B)
+            else:
+                t = np.append(self._trange, self._tmax)
+
         else:
             print('... put two drug names')
             return
 
         if rho >= 0:
             tmp = A + B - A*B - rho*np.minimum(A, B) * (1 - np.maximum(A, B))
-            self._pdata[new_drug+'_Time'] = self._trange
+            self._pdata[new_drug+'_Time'] = t
             self._pdata[new_drug] = tmp
             self._info.update({new_drug: [tmp.mean(), 1.0, tmp.max()]})
         else:
             tmp1 = (A + B - A*B)*(1 + rho) - rho
             tmp2 = A + B - A*B*(1 + rho)
 
-            tstar = np.argmin(np.abs(tmp1.values - tmp2.values))
-            self._pdata[new_drug+'_Time'] = self._trange
+            tstar = np.argmin(np.abs(tmp1 - tmp2))
+            self._pdata[new_drug+'_Time'] = t
             self._pdata[new_drug] = tmp2
             self._pdata[new_drug][:tstar] = tmp1[:tstar]
 
-
-    def plot_scurve(self, drugnames, ax=None, filename=None, labels=None):
+    def plot_scurve(self, drugnames, ax=None, filename=None, labels=None, save=True):
         """ plot survival curve of monotherapy """
 
         if ax is None: ax = plt.gcf().gca()
@@ -148,9 +164,9 @@ class POPULATION(object):
         ax.legend()
 
         if filename is None: filename = 'survival_curve_'+'_'.join(labels)+'.pdf'
-        plt.savefig(filename, dpi=150)
+        if save: plt.savefig(filename, dpi=150)
 
-    def plot_scurve_stime(self, drugnames, ax=None, filename=None, labels=None):
+    def plot_scurve_stime(self, drugnames, ax=None, filename=None, labels=None, save=True):
         """ plot survival curves from patient/cell survival times """
 
         if ax is None: ax = plt.gcf().gca()
@@ -176,9 +192,9 @@ class POPULATION(object):
         ax.legend()
 
         if filename is None: filename = 'survival_time_'+'_'.join(labels)+'.pdf'
-        plt.savefig(filename, dpi=150)
+        if save: plt.savefig(filename, dpi=150)
 
-    def plot_stime(self, drugnames, filename=None):
+    def plot_stime(self, drugnames, filename=None, save=True):
         """ scatterplot of individual survival time """
 
         #if ax is None:
@@ -202,7 +218,24 @@ class POPULATION(object):
         g.annotate(scipy.stats.spearmanr)
 
         if filename is None: filename = 'corr_plot'+'_'.join(drugnames)+'_{:.4f}.pdf'.format(rho)
-        g.savefig(filename, dpi=150)
+        if save: g.savefig(filename, dpi=150)
+
+    def plot_rainbow(self, drugnames, filename=None, num=11, save=True):
+        """ rainbow plot (rho from -1 to 1) """
+
+        fig = plt.figure(figsize=(8,6))
+        ax = fig.gca()
+
+        rhos = np.linspace(-1, 1, num=num)
+        for rho in rhos:
+            name = 'rho={:.2f}'.format(rho)
+            self.gen_comb_formula(drugnames, rho, new_drug=name)
+            ax.plot(self._pdata[name+'_Time'], self._pdata[name], label=name, alpha=0.3)
+
+        self.plot_scurve(drugnames, ax=ax, save=False)
+
+        if filename is None: filename = 'rainbow_'+'_'.join(drugnames)+'.pdf'
+        if save: plt.savefig(filename, dpi=150)
 
 
 def hill(t, t50, h):
@@ -305,74 +338,6 @@ def MC_suffle(N, rho, conf=0.001, rate=200.0, annealing=1.0, max_iter=50000000):
             break
 
     return y, it
-
-def jitter(orderedlist, j=0):
-    """ shuffle ordered list with j amount """
-
-    temp = orderedlist.copy()
-    newlist = []
-
-    for i in range(len(orderedlist)):
-        if j > len(temp)-1:
-            idx = len(temp)
-        else:
-            idx = j
-        element = np.random.choice(temp[:idx], 1) if idx > 0 else temp[0]
-        newlist.append(element)
-
-        # remove one element
-        mask = temp == element
-        if sum(mask) > 1:
-            print('... multiple {} - {}'.format(element, sum(mask)))
-        else:
-            temp = temp[~mask]
-
-    return np.array(newlist).flatten()
-
-
-def jitter2(orderedlist, j=0, sampleN=-1):
-    """ shuffle ordered list with j amount """
-
-    temp = orderedlist.copy()
-    if sampleN == -1:
-        sampleN = len(orderedlist)
-    newlist = []
-
-    if j == 0:
-        return temp
-
-    for i in range(sampleN):
-        idx1 = i-j if (i-j > 0) else 0
-        idx2 = len(temp) if (i+j > len(temp)) else i+j+1
-
-        element = np.random.choice(temp[idx1:idx2], 1)
-        newlist.append(element)
-
-    return np.array(newlist).flatten()
-
-
-def plot_sur_t(pA, pB, pBj, pAB, j=0):
-    #p0 = np.corrcoef(pA, y=pB)[0,1]
-    p0 = scipy.stats.spearmanr(pA, pB)[0]
-
-    #p = np.corrcoef(pA, y=pBj)[0,1]
-    p = scipy.stats.spearmanr(pA, pBj)[0]
-
-    fig = plt.figure(figsize=(14,5))
-    ax = plt.subplot(121)
-
-    plot_survival(pA, t, label='A')
-    plot_survival(pB, t, label='B')
-    plot_survival(pAB, t, label='A+B')
-    plt.legend()
-
-    ax = plt.subplot(122)
-    plt.plot(pA, pB, '.', label='j=0 p={0:.2f}'.format(p0))
-    plt.plot(pA, pBj, '.', label='j={0:d} p={1:.2f}'.format(j, p))
-    plt.plot(pA, pA, label='y=x')
-    plt.xlabel('t_A')
-    plt.ylabel('t_B')
-    plt.legend()
 
 
 @njit(fastmath=True, cache=True)
